@@ -1,0 +1,25 @@
+{
+  "url": {
+    "description": "douyin_tiktok_download_api",
+    "type": "string",
+    "hint": "部署douyin_tiktok_download_api的地址，例如：http://127.0.0.1:80"
+  },
+  "isThumbs": {
+    "description": "是否发送缩略图",
+    "type": "bool"
+  },
+  "isSendVideo": {
+    "description": "是否发送视频",
+    "type": "bool"
+  },
+  "videoMaxDuration": {
+    "description": "允许发送的最大视频长度，单位为秒，0表示不限制",
+    "type": "int",
+    "hint": "注意限制，避免napcat因视频过大而崩溃"
+  },
+  "videoMaxSize": {
+    "description": "允许发送的最大视频大小，单位为MB，0表示不限制",
+    "type": "int",
+    "hint": "注意限制，避免napcat因视频过大而崩溃"
+  }
+}
