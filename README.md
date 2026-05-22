@@ -1,14 +1,13 @@
-# astrbot-plugin-helloworld
+需要部署解析服务[Douyin_TikTok_Download_API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API)
 
-AstrBot 插件模板 / A template plugin for AstrBot plugin feature
+识别抖音/tiktok链接，发送链接信息和视频
 
-> [!NOTE]
-> This repo is just a template of [AstrBot](https://github.com/AstrBotDevs/AstrBot) Plugin.
-> 
-> [AstrBot](https://github.com/AstrBotDevs/AstrBot) is an agentic assistant for both personal and group conversations. It can be deployed across dozens of mainstream instant messaging platforms, including QQ, Telegram, Feishu, DingTalk, Slack, LINE, Discord, Matrix, etc. In addition, it provides a reliable and extensible conversational AI infrastructure for individuals, developers, and teams. Whether you need a personal AI companion, an intelligent customer support agent, an automation assistant, or an enterprise knowledge base, AstrBot enables you to quickly build AI applications directly within your existing messaging workflows.
+## 插件设置：
+<img width="1507" height="769" alt="PixPin_2026-05-22_15-41-50" src="https://github.com/user-attachments/assets/209d8600-f98f-42c9-a4f3-f2f6c3565767" />
 
-# Supports
+## 视频效果：
+<img width="1011" height="1504" alt="PixPin_2026-05-22_15-43-33" src="https://github.com/user-attachments/assets/8c135335-c926-4746-89f5-129b402cf708" />
 
-- [AstrBot Repo](https://github.com/AstrBotDevs/AstrBot)
-- [AstrBot Plugin Development Docs (Chinese)](https://docs.astrbot.app/dev/star/plugin-new.html)
-- [AstrBot Plugin Development Docs (English)](https://docs.astrbot.app/en/dev/star/plugin-new.html)
+
+## 图文效果：
+<img width="1034" height="508" alt="PixPin_2026-05-22_15-42-24" src="https://github.com/user-attachments/assets/28e53aca-c6c5-4d04-bbc0-9eae1bfe68af" />
