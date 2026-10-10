@@ -1,0 +1,26 @@
+{
+  "platform": "douyin",
+  "content_id": "7660875690212492466",
+  "kind": "video",
+  "web_url": "https://www.douyin.com/video/7660875690212492466",
+  "title": "测试视频",
+  "description": "测试视频\n第二行描述 #测试",
+  "duration_ms": 62034,
+  "is_deleted": false,
+  "is_private": false,
+  "author": {"uid": "MS4wLjAB_test", "nickname": "测试作者"},
+  "stats": {"digg_count": 66211, "comment_count": 0, "collect_count": null, "share_count": 10738},
+  "media": {
+    "covers": [{"url": "https://cdn.example/cover.jpg", "urls": ["https://mirror.example/cover.jpg"]}],
+    "video": {
+      "url": "https://cdn.example/video.mp4",
+      "urls": ["https://cdn.example/video.mp4", "https://mirror.example/video.mp4"],
+      "size_bytes": 14784469,
+      "watermark": false
+    },
+    "streams": [{"url": "https://cdn.example/watermark.mp4", "watermark": true}],
+    "images": []
+  },
+  "raw": {"video": {"big_thumbs": [{"img_url": "https://cdn.example/thumb.jpg"}]}},
+  "future_field": "ignored"
+}

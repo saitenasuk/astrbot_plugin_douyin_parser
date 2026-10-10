@@ -1,25 +1,66 @@
 {
   "url": {
-    "description": "douyin_tiktok_download_api",
+    "description": "DTK v5 API 地址",
     "type": "string",
-    "hint": "部署douyin_tiktok_download_api的地址，例如：http://127.0.0.1:80"
+    "default": "http://127.0.0.1:8000",
+    "hint": "填写 AstrBot 可访问的 DTK 地址，如 http://dtk-api:8000；可带反向代理路径前缀，不要填写 /mcp/ 或旧版接口地址"
+  },
+  "apiKey": {
+    "description": "DTK API Key",
+    "type": "string",
+    "default": "",
+    "hint": "在 DTK 控制台创建，至少授予 douyin:read 和/或 tiktok:read；通过 Authorization 请求头发送，不会传给 NapCat。仅开放匿名接口时可留空"
   },
   "isThumbs": {
-    "description": "是否发送缩略图",
-    "type": "bool"
+    "description": "是否发送视频封面/缩略图",
+    "type": "bool",
+    "default": false,
+    "hint": "关闭时只发送文字信息；图文原图不受此开关影响"
   },
   "isSendVideo": {
-    "description": "是否发送视频",
-    "type": "bool"
+    "description": "是否发送作品媒体（视频/图文/实况图）",
+    "type": "bool",
+    "default": false,
+    "hint": "关闭时仍返回作品文字信息；多张图文使用合并转发，单张图文直接发送"
   },
   "videoMaxDuration": {
-    "description": "允许发送的最大视频长度，单位为秒，0表示不限制",
+    "description": "允许发送的最大视频长度（秒）",
     "type": "int",
-    "hint": "注意限制，避免napcat因视频过大而崩溃"
+    "default": 0,
+    "hint": "0 表示不限制。启用限制但 DTK 未提供时长时会跳过视频；也适用于实况图视频"
   },
   "videoMaxSize": {
-    "description": "允许发送的最大视频大小，单位为MB，0表示不限制",
+    "description": "允许发送的最大视频大小（MB）",
     "type": "int",
-    "hint": "注意限制，避免napcat因视频过大而崩溃"
+    "default": 0,
+    "hint": "0 表示不限制，1MB 按 1024×1024 字节计算。启用限制但 DTK 未提供大小时会跳过视频，以保护 NapCat"
+  },
+  "apiTimeout": {
+    "description": "单次 DTK HTTP 请求超时（秒）",
+    "type": "int",
+    "default": 30
+  },
+  "taskTimeout": {
+    "description": "DTK 解析任务总等待超时（秒）",
+    "type": "int",
+    "default": 120,
+    "hint": "包括提交和轮询。超时不会重复提交或取消 DTK 的原任务"
+  },
+  "taskPollInterval": {
+    "description": "DTK 任务轮询间隔（秒）",
+    "type": "int",
+    "default": 2,
+    "hint": "最小 1 秒；API Key 限流较严格时请调大"
+  },
+  "mediaDownloadTimeout": {
+    "description": "单个媒体的 NapCat 下载超时（秒）",
+    "type": "int",
+    "default": 120
+  },
+  "downloadConcurrency": {
+    "description": "NapCat 媒体下载并发上限",
+    "type": "int",
+    "default": 3,
+    "hint": "所有消息共用上限，最小 1；高分辨率图文较多时可调低以减少资源占用"
   }
 }

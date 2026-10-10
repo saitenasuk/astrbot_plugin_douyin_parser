@@ -1,0 +1,30 @@
+{
+  "platform": "douyin",
+  "content_id": "7660875690212492467",
+  "kind": "image_album",
+  "web_url": "https://www.douyin.com/note/7660875690212492467",
+  "title": "测试图文",
+  "description": "测试图文",
+  "duration_ms": null,
+  "author": {"nickname": "图文作者"},
+  "stats": {"digg_count": null, "comment_count": 0, "collect_count": 10, "share_count": null},
+  "media": {
+    "covers": [],
+    "video": null,
+    "streams": [],
+    "images": [
+      {"url": "https://cdn.example/1.jpg", "urls": ["https://mirror.example/1.jpg"]},
+      {"url": "https://cdn.example/2.jpg", "urls": []}
+    ]
+  },
+  "raw": {
+    "images": [
+      {},
+      {"video": {
+        "duration": 3000,
+        "play_addr": {"url_list": ["https://cdn.example/live.mp4"], "data_size": 1024},
+        "download_addr": {"url_list": ["https://cdn.example/live-watermark.mp4"]}
+      }}
+    ]
+  }
+}

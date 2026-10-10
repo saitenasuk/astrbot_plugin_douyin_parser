@@ -1,274 +1,315 @@
+from __future__ import annotations
+
 import asyncio
 import re
-
-import httpx
+from pathlib import PurePosixPath, PureWindowsPath
+from urllib.parse import quote, urlsplit
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Video
 from astrbot.api.star import Context, Star
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
 
+from .dtk_client import AlbumItem, DTKClient, DTKError, MediaAsset, Post
 
-async def _download_file(bot, url: str, headers: list[str] | None = None) -> str:
-    """调用 NapCat /download_file 下载文件，返回本地路径"""
-    payload = {"url": url}
-    if headers:
-        payload["headers"] = headers
-    resp = await bot.call_action("download_file", **payload)
-    return resp["file"]
-
-
-def _format_duration(ms: int) -> str:
-    """将毫秒转换为可读时长"""
-    seconds = ms // 1000
-    m, s = divmod(seconds, 60)
-    h, m = divmod(m, 60)
-    if h > 0:
-        return f"{h}时{m}分{s}秒"
-    if m > 0:
-        return f"{m}分{s}秒"
-    return f"{s}秒"
+_URL_PATTERN = re.compile(
+    r"https?://[^\s<>\"'，。！？；：、【】（）《》\u4e00-\u9fff]+", re.IGNORECASE
+)
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 
 
-def _shorten_number(n: int) -> str:
-    """将大数字简写为 k/m 格式"""
-    if n >= 1000000:
-        return f"{n / 1000000:.1f}m"
-    if n >= 1000:
-        return f"{n / 1000:.1f}k"
-    return str(n)
-
-
-def _get_cover_url(video_info: dict, is_thumbs: bool) -> str | None:
-    """从 video 数据中提取封面图 URL"""
-    if is_thumbs:
-        big_thumbs = video_info.get("big_thumbs", [])
-        if big_thumbs and big_thumbs[0].get("img_url"):
-            return big_thumbs[0]["img_url"]
-    cover_list = video_info.get("cover", {}).get("url_list", [])
-    return cover_list[0] if cover_list else None
-
-
-def _check_video_limits(config: AstrBotConfig, duration_ms: int, data_size: int | None) -> str | None:
-    """检查视频时长和大小限制，返回 None 表示通过，返回字符串表示被拦截的原因"""
-    max_duration = config.get("videoMaxDuration", 0)
-    if max_duration > 0:
-        duration_sec = duration_ms // 1000
-        if duration_sec > max_duration:
-            return f"视频时长 {duration_sec}秒 超过限制 {max_duration}秒，已跳过"
-
-    max_size = config.get("videoMaxSize", 0)
-    if max_size > 0 and data_size:
-        size_mb = data_size / 1024 / 1024
-        if size_mb > max_size:
-            return f"视频大小 {size_mb:.1f}MB 超过限制 {max_size}MB，已跳过"
-
+def _extract_url(text: str) -> str | None:
+    for match in _URL_PATTERN.finditer(text):
+        url = match.group().rstrip(".,!;:)]}")
+        try:
+            parts = urlsplit(url)
+            host = (parts.hostname or "").lower()
+        except ValueError:
+            continue
+        if not parts.username and any(
+            host == domain or host.endswith(f".{domain}") for domain in ("douyin.com", "tiktok.com")
+        ):
+            return url
     return None
 
 
-class DouyinParserPlugin(Star):
-    _DOUYIN_PATTERN = re.compile(
-        r"(https?://(?:[a-z0-9-]*\.)?(?:douyin\.com|tiktok\.com)[^\s]*)"
-    )
-    _FORWARD_NICKNAME = "抖音图文"
+def _config_number(config: AstrBotConfig, key: str, default: int) -> int:
+    try:
+        return max(0, int(config.get(key, default)))
+    except (TypeError, ValueError, OverflowError):
+        return default
 
+
+def _format_duration(ms: int | None) -> str:
+    if ms is None:
+        return "未知"
+    seconds = ms // 1000
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}时{minutes}分{seconds}秒"
+    if minutes:
+        return f"{minutes}分{seconds}秒"
+    return f"{seconds}秒"
+
+
+def _shorten_number(number: int | None) -> str:
+    if number is None:
+        return "未知"
+    if number >= 1_000_000:
+        return f"{number / 1_000_000:.1f}m"
+    if number >= 1000:
+        return f"{number / 1000:.1f}k"
+    return str(number)
+
+
+def _check_video_limits(
+    config: AstrBotConfig, duration_ms: int | None, size_bytes: int | None
+) -> str | None:
+    max_duration = _config_number(config, "videoMaxDuration", 0)
+    if max_duration:
+        if duration_ms is None:
+            return "未获取到视频时长，无法核验时长限制，已跳过"
+        # Compare milliseconds, not floored seconds (e.g. 60.9s exceeds 60s).
+        if duration_ms > max_duration * 1000:
+            return f"视频时长 {duration_ms / 1000:g}秒 超过限制 {max_duration}秒，已跳过"
+    max_size = _config_number(config, "videoMaxSize", 0)
+    if max_size:
+        if size_bytes is None:
+            return "未获取到视频大小，无法核验大小限制，已跳过"
+        if size_bytes > max_size * 1024 * 1024:
+            return f"视频大小 {size_bytes / 1024 / 1024:.1f}MB 超过限制 {max_size}MB，已跳过"
+    return None
+
+
+def _file_uri(path: str) -> str:
+    """Use NapCat's filesystem, including when it is in another container/OS."""
+    if path.startswith("file://"):
+        return path
+    windows_path = PureWindowsPath(path)
+    if windows_path.is_absolute():
+        encoded = quote(windows_path.as_posix(), safe="/:")
+        return f"file:{encoded}" if windows_path.drive.startswith("\\\\") else f"file:///{encoded}"
+    posix_path = PurePosixPath(path)
+    if posix_path.is_absolute():
+        return "file://" + quote(str(posix_path), safe="/")
+    raise ValueError("NapCat download_file did not return an absolute file path")
+
+
+async def _download_file(bot, url: str, headers: list[str] | None = None) -> str:
+    payload = {"url": url}
+    if headers:
+        payload["headers"] = headers
+    response = await bot.call_action("download_file", **payload)
+    if isinstance(response, dict) and "file" not in response:
+        response = response.get("data")
+    path = response.get("file") if isinstance(response, dict) else None
+    if not isinstance(path, str) or not path:
+        raise ValueError("NapCat download_file did not return a file path")
+    return path
+
+
+class MediaDownloadError(Exception):
+    pass
+
+
+class DouyinParserPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        self._client = httpx.AsyncClient(timeout=30)
+        self._dtk = DTKClient(
+            base_url=config.get("url") or "",
+            api_key=config.get("apiKey") or "",
+            request_timeout=max(1, _config_number(config, "apiTimeout", 30)),
+            task_timeout=max(1, _config_number(config, "taskTimeout", 120)),
+            poll_interval=max(1, _config_number(config, "taskPollInterval", 2)),
+        )
+        self._downloads = asyncio.Semaphore(
+            max(1, _config_number(config, "downloadConcurrency", 3))
+        )
 
     async def initialize(self):
-        logger.info("douyin_parser 插件已加载")
+        logger.info("douyin_parser 插件已加载（DTK v5）")
 
     async def terminate(self):
-        await self._client.aclose()
+        await self._dtk.aclose()
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
-        text = event.message_str.strip()
-        if not text:
+        # Avoid consuming identity quota on platforms we cannot reply to.
+        if not isinstance(event, AiocqhttpMessageEvent):
             return
-
-        match = self._DOUYIN_PATTERN.search(text)
-        if not match:
+        url = _extract_url(event.message_str or "")
+        if not url:
             return
-
-        url = match.group(1)
-        is_douyin = "douyin.com" in url
-        logger.info(f"检测到{'抖音' if is_douyin else 'TikTok'}链接: {url}")
-
-        # 调 API 获取视频数据
-        api_base = self.config.get("url", "")
-        if not api_base:
-            yield event.plain_result("错误：未配置 API 地址")
-            return
-
-        api_url = f"{api_base}/api/hybrid/video_data"
+        logger.info("douyin_parser 检测到抖音/TikTok 作品链接")
         try:
-            resp = await self._client.get(
-                api_url, params={"url": url, "minimal": False}
-            )
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception as e:
-            logger.error(f"请求 API 失败: {e}")
-            yield event.plain_result(f"请求解析失败: {e}")
-            return
-
-        if data.get("code") != 200 or not data.get("data"):
-            logger.error(f"API 返回异常: {data}")
-            yield event.plain_result("解析失败：API 返回异常")
-            return
-
-        video_data = data["data"]
-
-        # 构建视频信息文本
-        desc = video_data.get("desc", "")
-        author = video_data.get("author", {}).get("nickname", "未知")
-        duration_ms = video_data.get("duration", 0)
-        stats = video_data.get("statistics", {})
-
-        info_lines = [
-            f"标题：{desc}",
-            f"作者：{author}",
-        ]
-
-        if self.config.get("isSendVideo", False):
-            info_lines.append(f"时长：{_format_duration(duration_ms)}")
-
-        info_lines.append(
-            f"点赞：{_shorten_number(stats.get('digg_count', 0))}  "
-            f"评论：{_shorten_number(stats.get('comment_count', 0))}  "
-            f"收藏：{_shorten_number(stats.get('collect_count', 0))}  "
-            f"分享：{_shorten_number(stats.get('share_count', 0))}"
-        )
-        info_text = "\n".join(info_lines)
-
-        # 构建消息链：封面图在前，文字在后
-        chain_segments = []
-        cover_url = _get_cover_url(
-            video_data.get("video", {}), self.config.get("isThumbs", False)
-        )
-        if cover_url:
-            chain_segments.append({"type": "image", "data": {"file": cover_url}})
-        chain_segments.append({"type": "text", "data": {"text": info_text}})
-
-        # 只处理群消息
-        if isinstance(event, AiocqhttpMessageEvent) and event.get_group_id():
-            group_id = int(event.get_group_id())
-
-            media_type = video_data.get("media_type", 0)
-            is_phototext = is_douyin and media_type in (2, 42)
-
-            if is_phototext:
-                # 图文：只发合并转发，不发封面+文字
-                if self.config.get("isSendVideo", False):
-                    await self._send_phototext(event, group_id, video_data, url)
-            else:
-                # 视频/其他：先发封面+文字
-                await event.bot.call_action(
-                    "send_group_msg",
-                    group_id=group_id,
-                    message=chain_segments,
+            try:
+                post = await self._dtk.parse_url(url)
+            except DTKError as exc:
+                logger.warning(
+                    "DTK 解析失败: code=%s, request_id=%s, task_id=%s",
+                    exc.code,
+                    exc.request_id,
+                    exc.task_id,
                 )
+                yield event.plain_result(f"解析失败：{exc.user_message()}")
+                return
 
-                # 如果配置了发送视频
-                if self.config.get("isSendVideo", False) and media_type == 4:
-                    reason = _check_video_limits(
-                        self.config,
-                        duration_ms,
-                        video_data.get("video", {}).get("download_addr", {}).get("data_size"),
-                    )
-                    if reason:
-                        logger.info(reason)
-                        yield event.plain_result(reason)
-                    else:
-                        video_url = f"{api_base}/api/download?url={url}&prefix=true&with_watermark=false"
-                        yield event.chain_result([Video.fromURL(video_url)])
-
+            try:
+                if post.kind == "image_album" and self.config.get("isSendVideo", False):
+                    await self._send_album(event, post)
+                else:
+                    await self._send_info(event, post)
+                    if post.kind == "video" and self.config.get("isSendVideo", False):
+                        reason = _check_video_limits(
+                            self.config,
+                            post.duration_ms,
+                            post.video.size_bytes if post.video else None,
+                        )
+                        if reason:
+                            yield event.plain_result(reason)
+                        elif not post.video:
+                            yield event.plain_result("未获取到可下载的无水印视频地址")
+                        else:
+                            file = await self._download_asset(event, post.video, post.platform)
+                            await self._send_message(
+                                event, [{"type": "video", "data": {"file": file}}]
+                            )
+            except Exception as exc:
+                # Adapter exceptions can contain signed URLs or filesystem paths.
+                logger.warning("douyin_parser 媒体发送失败: %s", type(exc).__name__)
+                yield event.plain_result(
+                    "媒体下载或发送失败，请检查 NapCat 的网络、download_file 接口和 QQ 发送限制"
+                )
+        finally:
             event.stop_event()
 
-    async def _send_phototext(
-        self, event: AiocqhttpMessageEvent, group_id: int, video_data: dict, url: str
-    ):
-        images = video_data.get("images") or []
-        if not images:
+    @staticmethod
+    def _info_text(post: Post) -> str:
+        lines = [f"标题：{post.description}", f"作者：{post.author}"]
+        if post.kind == "video":
+            lines.append(f"时长：{_format_duration(post.duration_ms)}")
+        labels = (
+            ("点赞", "digg_count"),
+            ("评论", "comment_count"),
+            ("收藏", "collect_count"),
+            ("分享", "share_count"),
+        )
+        lines.append(
+            "  ".join(f"{label}：{_shorten_number(post.stats.get(key))}" for label, key in labels)
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _target(event: AiocqhttpMessageEvent) -> tuple[str, dict]:
+        group_id = event.get_group_id()
+        if group_id:
+            return "group", {"group_id": int(group_id)}
+        return "private", {"user_id": int(event.get_sender_id())}
+
+    async def _send_message(self, event: AiocqhttpMessageEvent, message: list[dict]):
+        kind, target = self._target(event)
+        await event.bot.call_action(f"send_{kind}_msg", **target, message=message)
+
+    async def _download_asset(
+        self, event: AiocqhttpMessageEvent, asset: MediaAsset, platform: str
+    ) -> str:
+        referer = "https://www.douyin.com/" if platform == "douyin" else "https://www.tiktok.com/"
+        headers = [f"Referer={referer}", f"User-Agent={_USER_AGENT}"]
+
+        async def download() -> str:
+            for url in asset.urls:
+                try:
+                    path = await _download_file(event.bot, url, headers)
+                    return _file_uri(path)
+                except Exception as exc:  # NapCat adapters have differing exception classes.
+                    logger.debug("douyin_parser CDN 下载失败: %s", type(exc).__name__)
+            raise MediaDownloadError("all CDN mirrors failed")
+
+        timeout = max(1, _config_number(self.config, "mediaDownloadTimeout", 120))
+        # Waiting for a concurrency slot must not consume the download deadline.
+        # The semaphore is shared across messages to avoid unbounded NapCat jobs.
+        async with self._downloads:
+            try:
+                return await asyncio.wait_for(download(), timeout=timeout)
+            except asyncio.TimeoutError as exc:
+                raise MediaDownloadError("NapCat download timed out") from exc
+
+    async def _send_info(self, event: AiocqhttpMessageEvent, post: Post):
+        segments = []
+        if self.config.get("isThumbs", False) and (cover := post.cover(prefer_thumbnail=True)):
+            try:
+                file = await self._download_asset(event, cover, post.platform)
+                segments.append({"type": "image", "data": {"file": file}})
+            except MediaDownloadError:
+                logger.info("douyin_parser 封面下载失败，继续发送文字信息")
+        segments.append({"type": "text", "data": {"text": self._info_text(post)}})
+        await self._send_message(event, segments)
+
+    async def _album_segments(
+        self, event: AiocqhttpMessageEvent, post: Post, item: AlbumItem, index: int
+    ) -> list[dict]:
+        note = None
+        if item.motion:
+            reason = _check_video_limits(
+                self.config, item.motion.duration_ms, item.motion.size_bytes
+            )
+            if reason:
+                note = f"第 {index} 张实况图：{reason}，改发静态图片"
+            else:
+                try:
+                    file = await self._download_asset(event, item.motion, post.platform)
+                    return [{"type": "video", "data": {"file": file}}]
+                except MediaDownloadError:
+                    note = f"第 {index} 张实况视频下载失败，改发静态图片"
+        try:
+            file = await self._download_asset(event, item.image, post.platform)
+            segments = [{"type": "image", "data": {"file": file}}]
+        except MediaDownloadError:
+            segments = []
+            note = f"第 {index} 张图片下载失败"
+        if note:
+            segments.append({"type": "text", "data": {"text": note}})
+        return segments
+
+    async def _send_album(self, event: AiocqhttpMessageEvent, post: Post):
+        if not post.images:
+            await self._send_info(event, post)
+            await self._send_message(
+                event, [{"type": "text", "data": {"text": "未获取到图文作品的图片地址"}}]
+            )
+            return
+        if len(post.images) == 1:
+            segments = await self._album_segments(event, post, post.images[0], 1)
+            segments.append({"type": "text", "data": {"text": self._info_text(post)}})
+            await self._send_message(event, segments)
             return
 
-        if len(images) > 1:
-            await self._send_phototext_forward(event, group_id, video_data, images)
-        else:
-            # 单条图文，如果有视频则额外发送
-            img = images[0]
-            video_url = (
-                img.get("video", {})
-                .get("download_addr", {})
-                .get("url_list", [None])[0]
-            )
-            if video_url:
-                local_path = await _download_file(event.bot, video_url, ["Referer=https://www.douyin.com/"])
-                await event.bot.call_action(
-                    "send_group_msg",
-                    group_id=group_id,
-                    message=[{"type": "video", "data": {"file": f"file://{local_path}"}}],
-                )
+        nickname = "抖音图文" if post.platform == "douyin" else "TikTok图文"
 
-    async def _send_phototext_forward(
-        self, event: AiocqhttpMessageEvent, group_id: int, video_data: dict, images: list
-    ):
-        """用合并转发发送多条图文"""
-        info_text = (
-            f"标题：{video_data.get('desc', '')}\n"
-            f"作者：{video_data.get('author', {}).get('nickname', '未知')}"
-        )
-        nodes: list[dict] = [
-            {
+        def node(content: list[dict]) -> dict:
+            return {
                 "type": "node",
                 "data": {
                     "user_id": event.get_self_id(),
-                    "nickname": self._FORWARD_NICKNAME,
-                    "content": [{"type": "text", "data": {"text": info_text}}],
+                    "nickname": nickname,
+                    "content": content,
                 },
             }
-        ]
 
-        async def _make_node(img: dict) -> dict | None:
-            video_cdn_url = (
-                img.get("video", {})
-                .get("download_addr", {})
-                .get("url_list", [None])[0]
+        nodes = [node([{"type": "text", "data": {"text": self._info_text(post)}}])]
+        results = await asyncio.gather(
+            *(
+                self._album_segments(event, post, item, index)
+                for index, item in enumerate(post.images, start=1)
             )
-            img_url = img.get("download_url_list", [None])[0]
-
-            if video_cdn_url:
-                local_path = await _download_file(
-                    event.bot, video_cdn_url, ["Referer=https://www.douyin.com/"]
-                )
-                return {
-                    "type": "node",
-                    "data": {
-                        "user_id": event.get_self_id(),
-                        "nickname": self._FORWARD_NICKNAME,
-                        "content": [
-                            {"type": "video", "data": {"file": f"file://{local_path}"}}
-                        ],
-                    },
-                }
-            elif img_url:
-                return {
-                    "type": "node",
-                    "data": {
-                        "user_id": event.get_self_id(),
-                        "nickname": self._FORWARD_NICKNAME,
-                        "content": [{"type": "image", "data": {"file": img_url}}],
-                    },
-                }
-            return None
-
-        results = await asyncio.gather(*[_make_node(img) for img in images])
-        nodes.extend(n for n in results if n is not None)
-
-        await event.bot.call_action("send_group_forward_msg", group_id=group_id, messages=nodes)
+        )
+        nodes.extend(node(segments) for segments in results)
+        kind, target = self._target(event)
+        await event.bot.call_action(f"send_{kind}_forward_msg", **target, messages=nodes)
