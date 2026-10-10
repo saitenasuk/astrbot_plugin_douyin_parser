@@ -70,6 +70,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             "url": "http://dtk:8000",
             "apiKey": "dtk_test_secret",
             "isSendVideo": True,
+            "isSendCover": False,
             "isThumbs": False,
         }
         self.plugin = main.DouyinParserPlugin(None, self.config)
@@ -113,18 +114,153 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.sent()), 1)
         self.assertEqual(self.downloads(), [])
 
-    async def test_cover_setting_controls_image_and_prefers_thumbnail(self):
-        self.config["isThumbs"] = True
-        self.config["isSendVideo"] = False
+    async def test_cover_switch_sends_regular_cover_not_thumbnail(self):
+        self.config.update(isSendCover=True, isSendVideo=False)
         await self.consume()
-        self.assertEqual(self.downloads()[0]["url"], "https://cdn.example/thumb.jpg")
+        self.assertEqual(
+            [payload["url"] for payload in self.downloads()], ["https://cdn.example/cover.jpg"]
+        )
+        self.assertEqual(self.sent()[0]["message"][0]["type"], "image")
+
+    async def test_thumbnail_switch_does_not_send_regular_cover(self):
+        self.config.update(isThumbs=True, isSendVideo=False)
+        await self.consume()
+        self.assertEqual(
+            [payload["url"] for payload in self.downloads()], ["https://cdn.example/thumb.jpg"]
+        )
         self.assertEqual(self.sent()[0]["message"][0]["type"], "image")
 
     async def test_cover_failure_does_not_prevent_text_reply(self):
+        self.config.update(isSendCover=True, isSendVideo=False)
+        self.event.bot = FakeBot(
+            failures=("https://cdn.example/cover.jpg", "https://mirror.example/cover.jpg")
+        )
+        await self.consume()
+        self.assertEqual(self.sent()[0]["message"][0]["type"], "text")
+        self.assertNotIn("https://cdn.example/thumb.jpg", [p["url"] for p in self.downloads()])
+
+    async def test_thumbnail_failure_does_not_prevent_text_reply(self):
         self.config.update(isThumbs=True, isSendVideo=False)
         self.event.bot = FakeBot(failures=("https://cdn.example/thumb.jpg",))
         await self.consume()
         self.assertEqual(self.sent()[0]["message"][0]["type"], "text")
+        self.assertNotIn("https://cdn.example/cover.jpg", [p["url"] for p in self.downloads()])
+
+    async def test_preview_switch_combinations_and_order(self):
+        for cover_enabled, thumb_enabled, expected in (
+            (False, False, []),
+            (True, False, ["https://cdn.example/cover.jpg"]),
+            (False, True, ["https://cdn.example/thumb.jpg"]),
+            (True, True, ["https://cdn.example/cover.jpg", "https://cdn.example/thumb.jpg"]),
+        ):
+            with self.subTest(cover=cover_enabled, thumbnail=thumb_enabled):
+                self.event = FakeEvent(URL)
+                self.config.update(
+                    isSendCover=cover_enabled, isThumbs=thumb_enabled, isSendVideo=False
+                )
+                self.assertEqual(await self.consume(), [])
+                self.assertEqual([p["url"] for p in self.downloads()], expected)
+                message = self.sent()[0]["message"]
+                self.assertEqual([s["type"] for s in message], ["image"] * len(expected) + ["text"])
+
+    async def test_missing_thumbnail_does_not_fall_back_to_cover(self):
+        data = fixture("video")
+        data["raw"] = None
+        self.plugin._dtk.parse_url.return_value = parse_post(data)
+        self.config.update(isThumbs=True, isSendVideo=False)
+        await self.consume()
+        self.assertEqual(self.downloads(), [])
+        self.assertEqual(self.sent()[0]["message"][0]["type"], "text")
+
+    async def test_missing_cover_does_not_fall_back_to_thumbnail(self):
+        data = fixture("video")
+        data["media"]["covers"] = []
+        self.plugin._dtk.parse_url.return_value = parse_post(data)
+        self.config.update(isSendCover=True, isSendVideo=False)
+        await self.consume()
+        self.assertEqual(self.downloads(), [])
+        self.assertEqual(self.sent()[0]["message"][0]["type"], "text")
+
+    async def test_cover_download_failure_keeps_enabled_thumbnail(self):
+        self.config.update(isSendCover=True, isThumbs=True, isSendVideo=False)
+        self.event.bot = FakeBot(
+            failures=("https://cdn.example/cover.jpg", "https://mirror.example/cover.jpg")
+        )
+        await self.consume()
+        message = self.sent()[0]["message"]
+        self.assertEqual(message[0]["data"]["file"], "file:///napcat/temp/thumb.jpg")
+        self.assertEqual([s["type"] for s in message], ["image", "text"])
+
+    async def test_thumbnail_download_failure_keeps_enabled_cover(self):
+        self.config.update(isSendCover=True, isThumbs=True, isSendVideo=False)
+        self.event.bot = FakeBot(failures=("https://cdn.example/thumb.jpg",))
+        await self.consume()
+        message = self.sent()[0]["message"]
+        self.assertEqual(message[0]["data"]["file"], "file:///napcat/temp/cover.jpg")
+        self.assertEqual([s["type"] for s in message], ["image", "text"])
+
+    async def test_preview_switches_do_not_control_video_sending(self):
+        self.config.update(isSendCover=True, isThumbs=True)
+        await self.consume()
+        self.assertEqual(
+            [p["url"] for p in self.downloads()],
+            [
+                "https://cdn.example/cover.jpg",
+                "https://cdn.example/thumb.jpg",
+                "https://cdn.example/video.mp4",
+            ],
+        )
+        self.assertEqual(self.sent()[1]["message"][0]["type"], "video")
+
+    async def test_preview_switches_do_not_add_album_metadata_images(self):
+        self.config.update(isSendCover=True, isThumbs=True, isSendVideo=False)
+        self.plugin._dtk.parse_url.return_value = parse_post(fixture("album"))
+        await self.consume()
+        self.assertEqual(self.downloads(), [])
+        self.assertEqual([s["type"] for s in self.sent()[0]["message"]], ["text"])
+
+    async def test_preview_switches_do_not_change_album_media_sending(self):
+        self.config.update(isSendCover=True, isThumbs=True)
+        self.plugin._dtk.parse_url.return_value = parse_post(fixture("album"))
+        await self.consume()
+        self.assertEqual(len(self.downloads()), 2)
+        self.assertEqual(self.sent(), [])
+        self.assertEqual(len(self.sent("send_group_forward_msg")[0]["messages"]), 3)
+
+    async def test_enabled_previews_skip_only_the_missing_asset(self):
+        self.config.update(isSendCover=True, isThumbs=True, isSendVideo=False)
+        for missing, expected in (
+            ("thumbnail", "https://cdn.example/cover.jpg"),
+            ("cover", "https://cdn.example/thumb.jpg"),
+        ):
+            with self.subTest(missing=missing):
+                data = fixture("video")
+                if missing == "thumbnail":
+                    data["raw"] = None
+                else:
+                    data["media"]["covers"] = []
+                self.plugin._dtk.parse_url.return_value = parse_post(data)
+                self.event = FakeEvent(URL)
+                await self.consume()
+                self.assertEqual([p["url"] for p in self.downloads()], [expected])
+
+    async def test_preview_upload_failure_keeps_text_and_video_sending(self):
+        self.config.update(isSendCover=True, isThumbs=True)
+
+        class PreviewUploadBot(FakeBot):
+            async def call_action(bot, action, **payload):
+                if action == "send_group_msg" and payload["message"][0]["type"] == "image":
+                    bot.calls.append((action, payload))
+                    raise ActionFailed("highway upload transport failed: TCP connect timeout")
+                return await super().call_action(action, **payload)
+
+        self.event.bot = PreviewUploadBot()
+        self.assertEqual(await self.consume(), [])
+        self.assertEqual(len(self.sent()), 3)
+        self.assertEqual([s["type"] for s in self.sent()[0]["message"]], ["image", "image", "text"])
+        self.assertEqual([s["type"] for s in self.sent()[1]["message"]], ["text"])
+        self.assertEqual(self.sent()[2]["message"][0]["type"], "video")
+        self.assertEqual(len(self.downloads()), 3)
 
     async def test_video_limits_prevent_download(self):
         self.config["videoMaxDuration"] = 60
@@ -440,7 +576,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("cdn.example", logs.output[0])
 
     async def test_cover_highway_failure_falls_back_to_text(self):
-        self.config.update(isThumbs=True, isSendVideo=False)
+        self.config.update(isSendCover=True, isSendVideo=False)
 
         class ImageUploadBot(FakeBot):
             async def call_action(bot, action, **payload):

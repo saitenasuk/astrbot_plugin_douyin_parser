@@ -43,6 +43,7 @@ async def check(args: argparse.Namespace) -> int:
                     "duration_ms": post.duration_ms,
                     "stats": post.stats,
                     "has_cover": post.cover() is not None,
+                    "has_thumbnail": post.thumbnail is not None,
                     "has_video": post.video is not None,
                     "video_size_bytes": post.video.size_bytes if post.video else None,
                     "image_count": len(post.images),

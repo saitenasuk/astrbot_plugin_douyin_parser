@@ -1,7 +1,7 @@
 name: astrbot_plugin_douyin_parser # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
 display_name: douyin_parser # 用于展示的名字，可以是方便人类阅读的名字（需要版本 >= v4.5.0，低版本不会报错，请放心填写）
 desc: 基于 DTK v5 解析抖音/TikTok 视频、图文和实况图 # 插件简短描述
-version: v0.1.1 # 插件版本号。格式：v1.1.1 或者 v1.1
+version: v0.1.2 # 插件版本号。格式：v1.1.1 或者 v1.1
 author: saitenasuk # 作者
 repo: https://github.com/saitenasuk/astrbot_plugin_douyin_parser # 插件的仓库地址
 astrbot_version: ">=4.25.1" # 声明 AstrBot 版本范围

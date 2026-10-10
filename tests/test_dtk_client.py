@@ -39,7 +39,20 @@ class ModelTests(unittest.TestCase):
         self.assertIsNone(post.stats["collect_count"])
         self.assertEqual(post.stats["comment_count"], 0)
         self.assertEqual(post.cover().urls[0], "https://cdn.example/cover.jpg")
-        self.assertEqual(post.cover(True).urls[0], "https://cdn.example/thumb.jpg")
+        self.assertEqual(post.thumbnail.urls[0], "https://cdn.example/thumb.jpg")
+
+    def test_cover_and_thumbnail_are_independent_assets(self):
+        data = fixture("video")
+        data["media"]["covers"] = []
+        post = parse_post(data)
+        self.assertIsNone(post.cover())
+        self.assertEqual(post.thumbnail.urls[0], "https://cdn.example/thumb.jpg")
+
+        data = fixture("video")
+        data["raw"] = None
+        post = parse_post(data)
+        self.assertEqual(post.cover().urls[0], "https://cdn.example/cover.jpg")
+        self.assertIsNone(post.thumbnail)
 
     def test_normalized_tiktok_uses_same_model(self):
         data = fixture("video")

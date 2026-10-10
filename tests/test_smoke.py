@@ -83,6 +83,8 @@ class SmokeTests(unittest.TestCase):
         self.assertEqual(body["content_id"], "7660875690212492466")
         self.assertEqual(body["video_size_bytes"], 14784469)
         self.assertTrue(body["has_video"])
+        self.assertTrue(body["has_cover"])
+        self.assertTrue(body["has_thumbnail"])
         self.assertEqual(len(self.requests), 2)
         self.assertTrue(self.requests[0][1].startswith("/proxy/api/v1/parse?"))
         self.assertEqual(self.requests[0][2]["include_raw"], True)

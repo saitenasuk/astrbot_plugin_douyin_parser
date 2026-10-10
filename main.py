@@ -257,19 +257,29 @@ class DouyinParserPlugin(Star):
 
     async def _send_info(self, event: AiocqhttpMessageEvent, post: Post):
         segments = []
-        if self.config.get("isThumbs", False) and (cover := post.cover(prefer_thumbnail=True)):
+        previews = []
+        # Cover and storyboard thumbnail are separate assets and switches.
+        # Never substitute one for the other when an asset is unavailable.
+        if post.kind == "video":
+            if self.config.get("isSendCover", False) and (cover := post.cover()):
+                previews.append(("封面", cover))
+            if self.config.get("isThumbs", False) and post.thumbnail:
+                previews.append(("缩略图", post.thumbnail))
+        for label, asset in previews:
             try:
-                file = await self._download_asset(event, cover, post.platform)
+                file = await self._download_asset(event, asset, post.platform)
                 segments.append({"type": "image", "data": {"file": file}})
             except MediaDownloadError as exc:
-                logger.info("douyin_parser 封面下载失败，继续发送文字: %s", exc.diagnostic())
+                logger.info(
+                    "douyin_parser %s下载失败，继续发送作品信息: %s", label, exc.diagnostic()
+                )
         segments.append({"type": "text", "data": {"text": self._info_text(post)}})
         try:
             await self._send_message(event, segments)
         except OneBotActionError as exc:
             if len(segments) == 1 or not exc.upload_failed:
                 raise
-            logger.warning("douyin_parser 封面上传失败，改发文字: %s", exc.diagnostic())
+            logger.warning("douyin_parser 封面/缩略图上传失败，改发文字: %s", exc.diagnostic())
             await self._send_message(event, segments[-1:])
 
     @staticmethod

@@ -11,11 +11,17 @@
     "default": "",
     "hint": "在 DTK 控制台创建，至少授予 douyin:read 和/或 tiktok:read；通过 Authorization 请求头发送，不会传给 OneBot 后端（SnowLuma/NapCat）。仅开放匿名接口时可留空"
   },
-  "isThumbs": {
-    "description": "是否发送视频封面/缩略图",
+  "isSendCover": {
+    "description": "是否发送视频封面",
     "type": "bool",
     "default": false,
-    "hint": "关闭时只发送文字信息；图文原图不受此开关影响"
+    "hint": "只发送普通视频封面，不优先使用缩略图。与缩略图开关独立，两个都开启时分别发送；不影响图文原图"
+  },
+  "isThumbs": {
+    "description": "是否发送视频缩略图",
+    "type": "bool",
+    "default": false,
+    "hint": "仅发送 DTK 提供的独立缩略图（big_thumbs），没有缩略图时跳过，不自动替换成封面；不影响图文原图"
   },
   "isSendVideo": {
     "description": "是否发送作品媒体（视频/图文/实况图）",

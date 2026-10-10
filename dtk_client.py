@@ -132,9 +132,8 @@ class Post:
     video: MediaAsset | None
     images: tuple[AlbumItem, ...]
 
-    def cover(self, prefer_thumbnail: bool = False) -> MediaAsset | None:
-        if prefer_thumbnail and self.thumbnail:
-            return self.thumbnail
+    def cover(self) -> MediaAsset | None:
+        """Return the ordinary cover, never the storyboard thumbnail."""
         if self.covers:
             return self.covers[0]
         return self.images[0].image if self.images else None
