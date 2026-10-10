@@ -1,7 +1,7 @@
 """DTK v5 REST client and the small, platform-neutral model used by the plugin.
 
 This module has no AstrBot dependency. DTK credentials are only sent to the REST
-API; the media URLs returned by DTK are downloaded separately by NapCat.
+API; the media URLs returned by DTK are downloaded separately by the OneBot backend.
 """
 
 from __future__ import annotations

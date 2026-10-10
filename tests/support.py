@@ -8,6 +8,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import dtk_client
+import onebot_media
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -68,6 +69,7 @@ def load_plugin():
     package.__path__ = [str(ROOT)]
     sys.modules[package_name] = package
     sys.modules[f"{package_name}.dtk_client"] = dtk_client
+    sys.modules[f"{package_name}.onebot_media"] = onebot_media
     stubs = {}
     for name in (
         "astrbot",
@@ -108,3 +110,11 @@ def load_plugin():
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = old_module
+
+
+class ActionFailed(Exception):
+    """Matches aiocqhttp.ActionFailed.result, including SnowLuma wording."""
+
+    def __init__(self, wording, retcode=1200):
+        self.result = {"status": "failed", "retcode": retcode, "data": None, "wording": wording}
+        super().__init__(self.result)

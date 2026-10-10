@@ -9,7 +9,7 @@
     "description": "DTK API Key",
     "type": "string",
     "default": "",
-    "hint": "在 DTK 控制台创建，至少授予 douyin:read 和/或 tiktok:read；通过 Authorization 请求头发送，不会传给 NapCat。仅开放匿名接口时可留空"
+    "hint": "在 DTK 控制台创建，至少授予 douyin:read 和/或 tiktok:read；通过 Authorization 请求头发送，不会传给 OneBot 后端（SnowLuma/NapCat）。仅开放匿名接口时可留空"
   },
   "isThumbs": {
     "description": "是否发送视频封面/缩略图",
@@ -33,7 +33,7 @@
     "description": "允许发送的最大视频大小（MB）",
     "type": "int",
     "default": 0,
-    "hint": "0 表示不限制，1MB 按 1024×1024 字节计算。启用限制但 DTK 未提供大小时会跳过视频，以保护 NapCat"
+    "hint": "0 表示不限制，1MB 按 1024×1024 字节计算。启用限制但 DTK 未提供大小时会跳过视频，以保护 OneBot 后端（SnowLuma/NapCat）"
   },
   "apiTimeout": {
     "description": "单次 DTK HTTP 请求超时（秒）",
@@ -53,14 +53,20 @@
     "hint": "最小 1 秒；API Key 限流较严格时请调大"
   },
   "mediaDownloadTimeout": {
-    "description": "单个媒体的 NapCat 下载超时（秒）",
+    "description": "单个媒体的 OneBot 后端下载超时（秒）",
     "type": "int",
     "default": 120
   },
   "downloadConcurrency": {
-    "description": "NapCat 媒体下载并发上限",
+    "description": "媒体下载并发上限（SnowLuma/NapCat）",
     "type": "int",
     "default": 3,
     "hint": "所有消息共用上限，最小 1；高分辨率图文较多时可调低以减少资源占用"
+  },
+  "sendLinkOnFailure": {
+    "description": "视频下载或上传失败时提供链接",
+    "type": "bool",
+    "default": true,
+    "hint": "不重复上传视频。失败提示附作品链接和短期有效媒体直链；不绕过大小或时长限制，也不解决 QQ Highway 网络故障"
   }
 }

@@ -13,6 +13,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 )
 
 from .dtk_client import AlbumItem, DTKClient, DTKError, MediaAsset, Post
+from .onebot_media import MediaDownloadError, OneBotActionError, call_action
 
 _URL_PATTERN = re.compile(
     r"https?://[^\s<>\"'，。！？；：、【】（）《》\u4e00-\u9fff]+", re.IGNORECASE
@@ -88,7 +89,7 @@ def _check_video_limits(
 
 
 def _file_uri(path: str) -> str:
-    """Use NapCat's filesystem, including when it is in another container/OS."""
+    """Use the OneBot backend's filesystem, including when it is in another container/OS."""
     if path.startswith("file://"):
         return path
     windows_path = PureWindowsPath(path)
@@ -98,24 +99,20 @@ def _file_uri(path: str) -> str:
     posix_path = PurePosixPath(path)
     if posix_path.is_absolute():
         return "file://" + quote(str(posix_path), safe="/")
-    raise ValueError("NapCat download_file did not return an absolute file path")
+    raise ValueError("OneBot download_file did not return an absolute file path")
 
 
 async def _download_file(bot, url: str, headers: list[str] | None = None) -> str:
     payload = {"url": url}
     if headers:
         payload["headers"] = headers
-    response = await bot.call_action("download_file", **payload)
+    response = await call_action(bot, "download_file", **payload)
     if isinstance(response, dict) and "file" not in response:
         response = response.get("data")
     path = response.get("file") if isinstance(response, dict) else None
     if not isinstance(path, str) or not path:
-        raise ValueError("NapCat download_file did not return a file path")
+        raise MediaDownloadError("download_file did not return a file path")
     return path
-
-
-class MediaDownloadError(Exception):
-    pass
 
 
 class DouyinParserPlugin(Star):
@@ -161,6 +158,7 @@ class DouyinParserPlugin(Star):
                 yield event.plain_result(f"解析失败：{exc.user_message()}")
                 return
 
+            video_attempted = False
             try:
                 if post.kind == "image_album" and self.config.get("isSendVideo", False):
                     await self._send_album(event, post)
@@ -177,16 +175,20 @@ class DouyinParserPlugin(Star):
                         elif not post.video:
                             yield event.plain_result("未获取到可下载的无水印视频地址")
                         else:
+                            video_attempted = True
                             file = await self._download_asset(event, post.video, post.platform)
                             await self._send_message(
                                 event, [{"type": "video", "data": {"file": file}}]
                             )
+            except OneBotActionError as exc:
+                logger.warning("douyin_parser 媒体处理失败: %s", exc.diagnostic())
+                message = exc.user_message()
+                if video_attempted and self.config.get("sendLinkOnFailure", True):
+                    message += self._media_links(post, url)
+                yield event.plain_result(message)
             except Exception as exc:
-                # Adapter exceptions can contain signed URLs or filesystem paths.
-                logger.warning("douyin_parser 媒体发送失败: %s", type(exc).__name__)
-                yield event.plain_result(
-                    "媒体下载或发送失败，请检查 NapCat 的网络、download_file 接口和 QQ 发送限制"
-                )
+                logger.warning("douyin_parser 媒体处理异常: %s", type(exc).__name__)
+                yield event.plain_result("媒体处理失败，请查看插件及 OneBot 后端日志")
         finally:
             event.stop_event()
 
@@ -215,7 +217,7 @@ class DouyinParserPlugin(Star):
 
     async def _send_message(self, event: AiocqhttpMessageEvent, message: list[dict]):
         kind, target = self._target(event)
-        await event.bot.call_action(f"send_{kind}_msg", **target, message=message)
+        await call_action(event.bot, f"send_{kind}_msg", **target, message=message)
 
     async def _download_asset(
         self, event: AiocqhttpMessageEvent, asset: MediaAsset, platform: str
@@ -224,22 +226,34 @@ class DouyinParserPlugin(Star):
         headers = [f"Referer={referer}", f"User-Agent={_USER_AGENT}"]
 
         async def download() -> str:
+            last_error = None
             for url in asset.urls:
                 try:
                     path = await _download_file(event.bot, url, headers)
                     return _file_uri(path)
-                except Exception as exc:  # NapCat adapters have differing exception classes.
-                    logger.debug("douyin_parser CDN 下载失败: %s", type(exc).__name__)
-            raise MediaDownloadError("all CDN mirrors failed")
+                except OneBotActionError as exc:
+                    last_error = exc
+                    logger.debug("douyin_parser CDN 下载失败: %s", exc.diagnostic())
+                    if exc.reason in (
+                        "DOWNLOAD_UNSUPPORTED",
+                        "ONEBOT_CONNECTION_ERROR",
+                        "ONEBOT_TIMEOUT",
+                    ):
+                        break
+                except ValueError:
+                    last_error = MediaDownloadError("download_file returned an invalid file path")
+            raise MediaDownloadError("all CDN mirrors failed", last_error=last_error)
 
         timeout = max(1, _config_number(self.config, "mediaDownloadTimeout", 120))
         # Waiting for a concurrency slot must not consume the download deadline.
-        # The semaphore is shared across messages to avoid unbounded NapCat jobs.
+        # The semaphore is shared across messages to avoid unbounded OneBot jobs.
         async with self._downloads:
             try:
                 return await asyncio.wait_for(download(), timeout=timeout)
             except asyncio.TimeoutError as exc:
-                raise MediaDownloadError("NapCat download timed out") from exc
+                raise MediaDownloadError(
+                    "OneBot download timed out", reason="DOWNLOAD_TIMEOUT"
+                ) from exc
 
     async def _send_info(self, event: AiocqhttpMessageEvent, post: Post):
         segments = []
@@ -247,16 +261,35 @@ class DouyinParserPlugin(Star):
             try:
                 file = await self._download_asset(event, cover, post.platform)
                 segments.append({"type": "image", "data": {"file": file}})
-            except MediaDownloadError:
-                logger.info("douyin_parser 封面下载失败，继续发送文字信息")
+            except MediaDownloadError as exc:
+                logger.info("douyin_parser 封面下载失败，继续发送文字: %s", exc.diagnostic())
         segments.append({"type": "text", "data": {"text": self._info_text(post)}})
-        await self._send_message(event, segments)
+        try:
+            await self._send_message(event, segments)
+        except OneBotActionError as exc:
+            if len(segments) == 1 or not exc.upload_failed:
+                raise
+            logger.warning("douyin_parser 封面上传失败，改发文字: %s", exc.diagnostic())
+            await self._send_message(event, segments[-1:])
+
+    @staticmethod
+    def _media_links(post: Post, original_url: str) -> str:
+        lines = [f"作品链接：{post.web_url or original_url}"]
+        if post.video and post.video.urls:
+            lines.append(f"媒体直链（可能过期或受平台访问限制）：{post.video.urls[0]}")
+        return "\n" + "\n".join(lines)
 
     async def _album_segments(
-        self, event: AiocqhttpMessageEvent, post: Post, item: AlbumItem, index: int
+        self,
+        event: AiocqhttpMessageEvent,
+        post: Post,
+        item: AlbumItem,
+        index: int,
+        *,
+        force_static: bool = False,
+        note: str | None = None,
     ) -> list[dict]:
-        note = None
-        if item.motion:
+        if item.motion and not force_static:
             reason = _check_video_limits(
                 self.config, item.motion.duration_ms, item.motion.size_bytes
             )
@@ -266,12 +299,14 @@ class DouyinParserPlugin(Star):
                 try:
                     file = await self._download_asset(event, item.motion, post.platform)
                     return [{"type": "video", "data": {"file": file}}]
-                except MediaDownloadError:
+                except MediaDownloadError as exc:
+                    logger.info("douyin_parser 实况视频下载失败，改发静态图: %s", exc.diagnostic())
                     note = f"第 {index} 张实况视频下载失败，改发静态图片"
         try:
             file = await self._download_asset(event, item.image, post.platform)
             segments = [{"type": "image", "data": {"file": file}}]
-        except MediaDownloadError:
+        except MediaDownloadError as exc:
+            logger.info("douyin_parser 图文图片下载失败: %s", exc.diagnostic())
             segments = []
             note = f"第 {index} 张图片下载失败"
         if note:
@@ -288,7 +323,22 @@ class DouyinParserPlugin(Star):
         if len(post.images) == 1:
             segments = await self._album_segments(event, post, post.images[0], 1)
             segments.append({"type": "text", "data": {"text": self._info_text(post)}})
-            await self._send_message(event, segments)
+            try:
+                await self._send_message(event, segments)
+            except OneBotActionError as exc:
+                if not exc.upload_failed or not any(s["type"] == "video" for s in segments):
+                    raise
+                logger.warning("douyin_parser 实况视频上传失败，改发静态图: %s", exc.diagnostic())
+                fallback = await self._album_segments(
+                    event,
+                    post,
+                    post.images[0],
+                    1,
+                    force_static=True,
+                    note="实况视频 QQ 上传失败，改发静态图片",
+                )
+                fallback.append({"type": "text", "data": {"text": self._info_text(post)}})
+                await self._send_message(event, fallback)
             return
 
         nickname = "抖音图文" if post.platform == "douyin" else "TikTok图文"
@@ -312,4 +362,30 @@ class DouyinParserPlugin(Star):
         )
         nodes.extend(node(segments) for segments in results)
         kind, target = self._target(event)
-        await event.bot.call_action(f"send_{kind}_forward_msg", **target, messages=nodes)
+        action = f"send_{kind}_forward_msg"
+        try:
+            await call_action(event.bot, action, **target, messages=nodes)
+        except OneBotActionError as exc:
+            if not exc.upload_failed or not any(
+                segment["type"] == "video" for segments in results for segment in segments
+            ):
+                raise
+            logger.warning("douyin_parser 实况转发上传失败，改发静态图: %s", exc.diagnostic())
+            fallback = []
+            for index, (item, segments) in enumerate(
+                zip(post.images, results, strict=True), start=1
+            ):
+                if any(segment["type"] == "video" for segment in segments):
+                    segments = await self._album_segments(
+                        event,
+                        post,
+                        item,
+                        index,
+                        force_static=True,
+                        note=f"第 {index} 张实况视频 QQ 上传失败，改发静态图片",
+                    )
+                fallback.append(segments)
+            # Only one downgrade attempt, reuse prepared static images, and do
+            # not re-download/re-upload the same failed video.
+            fallback_nodes = [nodes[0], *(node(segments) for segments in fallback)]
+            await call_action(event.bot, action, **target, messages=fallback_nodes)

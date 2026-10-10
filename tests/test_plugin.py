@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import httpx
 
 from dtk_client import DTKError, MediaAsset, parse_post
-from tests.support import FakeBot, FakeEvent, fixture, load_plugin
+from tests.support import ActionFailed, FakeBot, FakeEvent, fixture, load_plugin
 from tests.test_dtk_client import TASK_ID, URL, response
 
 main = load_plugin()
@@ -130,6 +130,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.config["videoMaxDuration"] = 60
         results = await self.consume()
         self.assertIn("超过限制", results[0])
+        self.assertNotIn("媒体直链", results[0])
         self.assertEqual(self.downloads(), [])
         self.assertEqual(len(self.sent()), 1)
 
@@ -223,7 +224,7 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
             failures=("https://cdn.example/video.mp4", "https://mirror.example/video.mp4")
         )
         results = await self.consume()
-        self.assertIn("媒体下载或发送失败", results[0])
+        self.assertIn("媒体下载失败", results[0])
         self.assertNotIn("secret", results[0])
         self.assertTrue(self.event.stopped)
 
@@ -332,9 +333,209 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
 
         self.event.bot = FailingBot()
         results = await self.consume()
-        self.assertIn("媒体下载或发送失败", results[0])
+        self.assertIn("媒体发送失败", results[0])
         self.assertNotIn("secret", results[0])
         self.assertTrue(self.event.stopped)
+
+    async def test_snowluma_cdn_404_tries_next_mirror(self):
+        class Cdn404Bot(FakeBot):
+            async def call_action(bot, action, **payload):
+                if action == "download_file" and payload["url"] == "https://cdn.example/video.mp4":
+                    bot.calls.append((action, payload))
+                    raise ActionFailed("HTTP 404 Not Found", 1200)
+                return await super().call_action(action, **payload)
+
+        self.event.bot = Cdn404Bot()
+        self.assertEqual(await self.consume(), [])
+        self.assertEqual(len(self.downloads()), 2)
+        self.assertEqual(self.downloads()[1]["url"], "https://mirror.example/video.mp4")
+
+    async def test_download_api_timeout_does_not_enqueue_other_mirrors(self):
+        class TimingError(Exception):
+            pass
+
+        class DownloadTimeoutBot(FakeBot):
+            async def call_action(bot, action, **payload):
+                if action == "download_file":
+                    bot.calls.append((action, payload))
+                    raise TimingError("API timed out")
+                return await super().call_action(action, **payload)
+
+        self.event.bot = DownloadTimeoutBot()
+        results = await self.consume()
+        self.assertIn("下载响应超时", results[0])
+        self.assertEqual(len(self.downloads()), 1)
+        self.assertEqual(len(self.sent()), 1)
+
+    async def test_snowluma_download_file_contract(self):
+        class SnowLumaBot(FakeBot):
+            async def call_action(bot, action, **payload):
+                if action == "download_file":
+                    bot.calls.append((action, payload))
+                    return {
+                        "status": "ok",
+                        "retcode": 0,
+                        "data": {"file": "/app/data/downloads/snow video.mp4"},
+                    }
+                return await super().call_action(action, **payload)
+
+        self.event.bot = SnowLumaBot()
+        await self.consume()
+        self.assertEqual(
+            self.sent()[1]["message"][0]["data"]["file"],
+            "file:///app/data/downloads/snow%20video.mp4",
+        )
+        self.assertIn("Referer=https://www.douyin.com/", self.downloads()[0]["headers"])
+
+    async def test_highway_failure_has_stage_diagnostic_and_link_without_video_retry(self):
+        class HighwayBot(FakeBot):
+            async def call_action(bot, action, **payload):
+                if action == "send_group_msg" and payload["message"][0]["type"] == "video":
+                    bot.calls.append((action, payload))
+                    raise ActionFailed(
+                        "highway upload transport failed after 3 attempts "
+                        "(cmdId=1005 chunk=1048576/39116665 offset=0): Error: TCP connect timeout"
+                    )
+                return await super().call_action(action, **payload)
+
+        self.event.bot = HighwayBot()
+        with self.assertLogs("douyin-parser-tests", level="WARNING") as logs:
+            results = await self.consume()
+        self.assertIn("已下载", results[0])
+        self.assertIn("QQ Highway", results[0])
+        self.assertIn("https://cdn.example/video.mp4", results[0])
+        self.assertIn("作品链接", results[0])
+        self.assertNotIn("NapCat", results[0])
+        self.assertIn("action=send_group_msg", logs.output[0])
+        self.assertIn("reason=HIGHWAY_CONNECT_TIMEOUT", logs.output[0])
+        self.assertIn("retcode=1200", logs.output[0])
+        self.assertEqual(len(self.downloads()), 1)
+        self.assertEqual(len(self.sent()), 2)
+        self.assertTrue(self.event.stopped)
+
+    async def test_failure_links_can_be_disabled(self):
+        self.config["sendLinkOnFailure"] = False
+        self.event.bot = FakeBot(
+            failures=("https://cdn.example/video.mp4", "https://mirror.example/video.mp4")
+        )
+        results = await self.consume()
+        self.assertIn("媒体下载失败", results[0])
+        self.assertNotIn("https://", results[0])
+
+    async def test_snowluma_download_failure_detail_is_sanitized_in_logs(self):
+        class BrokenDownloadBot(FakeBot):
+            async def call_action(bot, action, **payload):
+                if action == "download_file":
+                    raise ActionFailed(
+                        "CDN 403 https://cdn.example/video.mp4?sign=private Cookie=private-cookie"
+                    )
+                return await super().call_action(action, **payload)
+
+        self.event.bot = BrokenDownloadBot()
+        with self.assertLogs("douyin-parser-tests", level="WARNING") as logs:
+            results = await self.consume()
+        self.assertIn("媒体下载失败", results[0])
+        self.assertIn("CDN 403", logs.output[0])
+        self.assertNotIn("private", logs.output[0])
+        self.assertNotIn("cdn.example", logs.output[0])
+
+    async def test_cover_highway_failure_falls_back_to_text(self):
+        self.config.update(isThumbs=True, isSendVideo=False)
+
+        class ImageUploadBot(FakeBot):
+            async def call_action(bot, action, **payload):
+                if action == "send_group_msg" and payload["message"][0]["type"] == "image":
+                    bot.calls.append((action, payload))
+                    raise ActionFailed("highway upload transport failed: TCP connect timeout")
+                return await super().call_action(action, **payload)
+
+        self.event.bot = ImageUploadBot()
+        await self.consume()
+        self.assertEqual([segment["type"] for segment in self.sent()[1]["message"]], ["text"])
+        self.assertEqual(len(self.downloads()), 1)
+
+    async def test_single_live_photo_upload_failure_falls_back_once(self):
+        data = fixture("album")
+        data["media"]["images"] = data["media"]["images"][1:]
+        data["raw"]["images"] = data["raw"]["images"][1:]
+        self.plugin._dtk.parse_url.return_value = parse_post(data)
+
+        class LiveUploadBot(FakeBot):
+            async def call_action(bot, action, **payload):
+                if action == "send_group_msg" and payload["message"][0]["type"] == "video":
+                    bot.calls.append((action, payload))
+                    raise ActionFailed("highway upload transport failed: TCP connect timeout")
+                return await super().call_action(action, **payload)
+
+        self.event.bot = LiveUploadBot()
+        self.assertEqual(await self.consume(), [])
+        self.assertEqual(len(self.sent()), 2)
+        self.assertEqual(self.sent()[1]["message"][0]["type"], "image")
+        self.assertIn("QQ 上传失败", self.sent()[1]["message"][1]["data"]["text"])
+        self.assertEqual(
+            [p["url"] for p in self.downloads()],
+            ["https://cdn.example/live.mp4", "https://cdn.example/2.jpg"],
+        )
+
+    async def test_forward_live_video_upload_failure_reuses_static_nodes(self):
+        self.plugin._dtk.parse_url.return_value = parse_post(fixture("album"))
+
+        class ForwardUploadBot(FakeBot):
+            async def call_action(bot, action, **payload):
+                if action == "send_group_forward_msg":
+                    bot.calls.append((action, payload))
+                    if any(
+                        segment["type"] == "video"
+                        for node in payload["messages"]
+                        for segment in node["data"]["content"]
+                    ):
+                        raise ActionFailed("highway upload transport failed: TCP connect timeout")
+                    return {}
+                return await super().call_action(action, **payload)
+
+        self.event.bot = ForwardUploadBot()
+        self.assertEqual(await self.consume(), [])
+        forwards = self.sent("send_group_forward_msg")
+        self.assertEqual(len(forwards), 2)
+        self.assertEqual(forwards[0]["messages"][1], forwards[1]["messages"][1])
+        self.assertEqual(forwards[1]["messages"][2]["data"]["content"][0]["type"], "image")
+        self.assertEqual(
+            [p["url"] for p in self.downloads()].count("https://cdn.example/live.mp4"), 1
+        )
+
+    async def test_forward_timeout_does_not_trigger_duplicate_album(self):
+        self.plugin._dtk.parse_url.return_value = parse_post(fixture("album"))
+
+        class TimingError(Exception):
+            pass
+
+        class TimeoutBot(FakeBot):
+            async def call_action(bot, action, **payload):
+                if action == "send_group_forward_msg":
+                    bot.calls.append((action, payload))
+                    raise TimingError("awaiting API result timed out")
+                return await super().call_action(action, **payload)
+
+        self.event.bot = TimeoutBot()
+        results = await self.consume()
+        self.assertIn("尚不确定", results[0])
+        self.assertEqual(len(self.sent("send_group_forward_msg")), 1)
+        self.assertNotIn("https://cdn.example/2.jpg", [p["url"] for p in self.downloads()])
+
+    async def test_failed_static_forward_is_not_retried_again(self):
+        self.plugin._dtk.parse_url.return_value = parse_post(fixture("album"))
+
+        class AllUploadsFailBot(FakeBot):
+            async def call_action(bot, action, **payload):
+                if action == "send_group_forward_msg":
+                    bot.calls.append((action, payload))
+                    raise ActionFailed("highway upload transport failed: TCP connect timeout")
+                return await super().call_action(action, **payload)
+
+        self.event.bot = AllUploadsFailBot()
+        results = await self.consume()
+        self.assertIn("QQ Highway", results[0])
+        self.assertEqual(len(self.sent("send_group_forward_msg")), 2)
 
     async def test_full_mocked_rest_to_qq_action_pipeline(self):
         async def handler(request):
